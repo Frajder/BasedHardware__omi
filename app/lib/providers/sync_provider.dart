@@ -1,18 +1,20 @@
 import 'dart:async';
+
 import 'package:flutter/foundation.dart';
+
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/wals.dart';
+import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/time_utils.dart';
-
-import '../utils/audio_player_utils.dart';
-import '../utils/waveform_utils.dart';
 import '../models/sync_state.dart';
+import '../utils/audio_player_utils.dart';
 import '../utils/conversation_sync_utils.dart';
+import '../utils/waveform_utils.dart';
 
 class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSyncProgressListener {
   // Services
-  final AudioPlayerUtils _audioPlayerUtils = AudioPlayerUtils();
+  final AudioPlayerUtils _audioPlayerUtils = AudioPlayerUtils.instance;
 
   // WAL management
   List<Wal> _allWals = [];
@@ -69,6 +71,12 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
   int get missingWalsInSeconds =>
       missingWals.isEmpty ? 0 : missingWals.map((val) => val.seconds).reduce((a, b) => a + b);
 
+  /// Missing WALs that are still on device storage (SD card or Limitless flash page)
+  /// These are files that need to be downloaded from the hardware device
+  List<Wal> get missingWalsOnDevice => _allWals
+      .where((w) => w.status == WalStatus.miss && (w.storage == WalStorage.sdcard || w.storage == WalStorage.flashPage))
+      .toList();
+
   // Backward compatibility getters
   bool get isSyncing => _syncState.isSyncing;
   bool get syncCompleted => _syncState.isCompleted;
@@ -78,6 +86,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
   List<SyncedConversationPointer> get syncedConversationsPointers => _syncState.syncedConversations;
   String? get syncError => _syncState.errorMessage;
   Wal? get failedWal => _syncState.failedWal;
+  SyncMethod? get currentSyncMethod => _syncState.syncMethod;
 
   // Flash page (Limitless) sync state
   bool get isFlashPageSyncing => _walService.getSyncs().isFlashPageSyncing;
@@ -124,7 +133,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
     notifyListeners();
 
     _allWals = await _walService.getSyncs().getAllWals();
-    debugPrint('SyncProvider: Loaded ${_allWals.length} WALs (${missingWals.length} missing)');
+    Logger.debug('SyncProvider: Loaded ${_allWals.length} WALs (${missingWals.length} missing)');
 
     _isLoadingWals = false;
     notifyListeners();
@@ -144,19 +153,19 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
     await refreshWals();
   }
 
-  Future<void> syncWals() async {
+  Future<void> syncWals({IWifiConnectionListener? connectionListener}) async {
     _updateSyncState(_syncState.toIdle());
     _initialMissingWalsCount = missingWals.length;
     await _performSync(
-      operation: () => _walService.getSyncs().syncAll(progress: this),
+      operation: () => _walService.getSyncs().syncAll(progress: this, connectionListener: connectionListener),
       context: 'sync all WALs',
     );
   }
 
-  Future<void> syncWal(Wal wal) async {
+  Future<void> syncWal(Wal wal, {IWifiConnectionListener? connectionListener}) async {
     _updateSyncState(_syncState.toIdle());
     await _performSync(
-      operation: () => _walService.getSyncs().syncWal(wal: wal, progress: this),
+      operation: () => _walService.getSyncs().syncWal(wal: wal, progress: this, connectionListener: connectionListener),
       context: 'sync WAL ${wal.id}',
       failedWal: wal,
     );
@@ -173,13 +182,13 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
       // Check for SD card WALs - if present, log two-phase sync
       final sdCardWals = missingWals.where((w) => w.storage == WalStorage.sdcard).toList();
       if (sdCardWals.isNotEmpty) {
-        debugPrint('SyncProvider: Two-phase sync - ${sdCardWals.length} SD card files will be downloaded first');
+        Logger.debug('SyncProvider: Two-phase sync - ${sdCardWals.length} SD card files will be downloaded first');
       }
 
       final result = await operation();
 
       if (result != null && _hasConversationResults(result)) {
-        debugPrint(
+        Logger.debug(
             'SyncProvider: $context returned ${result.newConversationIds.length} new, ${result.updatedConversationIds.length} updated conversations');
         await _processConversationResults(result);
       } else {
@@ -187,7 +196,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
       }
     } catch (e) {
       final errorMessage = _formatSyncError(e, failedWal);
-      debugPrint('SyncProvider: Error in $context: $errorMessage');
+      Logger.debug('SyncProvider: Error in $context: $errorMessage');
       _updateSyncState(_syncState.toError(message: errorMessage, failedWal: failedWal));
     }
   }
@@ -197,7 +206,20 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
   }
 
   String _formatSyncError(dynamic error, Wal? wal) {
-    final baseMessage = error.toString().replaceAll('Exception: ', '');
+    var baseMessage = error.toString().replaceAll('Exception: ', '').replaceAll('WifiSyncException: ', '');
+
+    // Convert technical WiFi errors to user-friendly messages
+    if (baseMessage.toLowerCase().contains('internal error') ||
+        baseMessage.toLowerCase().contains('invalidpacketlength') ||
+        baseMessage.toLowerCase().contains('packet length')) {
+      baseMessage = 'Failed to enable WiFi on device';
+    } else if (baseMessage.toLowerCase().contains('wifi') && baseMessage.toLowerCase().contains('setup')) {
+      baseMessage = 'Failed to enable WiFi on device';
+    } else if (baseMessage.toLowerCase().contains('tcp') || baseMessage.toLowerCase().contains('socket')) {
+      baseMessage = 'Connection interrupted';
+    } else if (baseMessage.toLowerCase().contains('timeout')) {
+      baseMessage = 'Device did not respond';
+    }
 
     if (wal != null) {
       final walInfo = '${secondsToHumanReadable(wal.seconds)} (${wal.codec.toFormattedString()})';
@@ -205,7 +227,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
       return 'Failed to process $source audio file $walInfo: $baseMessage';
     }
 
-    return 'Error processing audio files: $baseMessage';
+    return baseMessage;
   }
 
   Future<void> retrySync() async {
@@ -303,7 +325,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
 
   @override
   void onStatusChanged(WalServiceStatus status) {
-    debugPrint('SyncProvider: WAL service status changed to $status');
+    Logger.debug('SyncProvider: WAL service status changed to $status');
   }
 
   @override
@@ -320,7 +342,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
   }
 
   /// Transfer a single WAL from device storage (SD card or flash page) to phone storage
-  Future<void> transferWalToPhone(Wal wal) async {
+  Future<void> transferWalToPhone(Wal wal, {IWifiConnectionListener? connectionListener}) async {
     if (wal.storage != WalStorage.sdcard && wal.storage != WalStorage.flashPage) {
       throw Exception('This recording is already on phone');
     }
@@ -329,7 +351,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
     _updateSyncState(_syncState.toSyncing());
 
     try {
-      await _walService.getSyncs().syncWal(wal: wal, progress: this);
+      await _walService.getSyncs().syncWal(wal: wal, progress: this, connectionListener: connectionListener);
       await refreshWals();
       _updateSyncState(_syncState.toIdle());
     } catch (e) {
@@ -363,7 +385,6 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
   @override
   void dispose() {
     _audioPlayerUtils.removeListener(_onAudioPlayerStateChanged);
-    _audioPlayerUtils.dispose();
     WaveformUtils.clearCache();
     _walService.unsubscribe(this);
     super.dispose();

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/providers/base_provider.dart';
@@ -29,7 +30,7 @@ class DeveloperModeProvider extends BaseProvider {
   bool followUpQuestionEnabled = false;
   bool transcriptionDiagnosticEnabled = false;
   bool autoCreateSpeakersEnabled = false;
-  bool showGoalTrackerEnabled = false;
+  bool showGoalTrackerEnabled = true; // Default to true
   bool dailyReflectionEnabled = true;
 
   void onConversationEventsToggled(bool value) {
@@ -237,14 +238,14 @@ class DeveloperModeProvider extends BaseProvider {
   void onDailyReflectionChanged(var value) {
     dailyReflectionEnabled = value;
     SharedPreferencesUtil().dailyReflectionEnabled = value; // Save immediately
-    
+
     // Schedule or cancel the notification based on the setting
     if (value) {
       DailyReflectionNotification.scheduleDailyNotification(channelKey: 'channel');
     } else {
       DailyReflectionNotification.cancelNotification();
     }
-    
+
     notifyListeners();
   }
 }

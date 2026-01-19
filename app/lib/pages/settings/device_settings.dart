@@ -2,23 +2,25 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
+
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/pages/conversations/sync_page.dart';
 import 'package:omi/pages/home/firmware_update.dart';
-import 'package:omi/pages/settings/wifi_sync_settings_page.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/utils/analytics/intercom.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
-import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/logger.dart';
+import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/widgets/dialog.dart';
-import 'package:provider/provider.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 class DeviceSettings extends StatefulWidget {
   const DeviceSettings({super.key});
@@ -38,8 +40,6 @@ class _DeviceSettingsState extends State<DeviceSettings> {
 
   // WiFi sync state
   bool _isWifiSupported = false;
-  String? _wifiSsid;
-  String? _wifiPassword;
 
   Timer? _debounce;
   Timer? _micGainDebounce;
@@ -59,6 +59,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
       return Future.value(null);
     }
     await connection.unpair();
+
     return await connection.disconnect();
   }
 
@@ -134,18 +135,6 @@ class _DeviceSettingsState extends State<DeviceSettings> {
           setState(() {
             _isWifiSupported = wifiSupported;
           });
-
-          if (wifiSupported) {
-            final walService = ServiceManager.instance().wal;
-            final syncs = walService.getSyncs();
-            final credentials = syncs.sdcard.getWifiCredentials();
-            if (mounted && credentials != null) {
-              setState(() {
-                _wifiSsid = credentials['ssid'];
-                _wifiPassword = credentials['password'];
-              });
-            }
-          }
         }
       }
     }
@@ -424,14 +413,6 @@ class _DeviceSettingsState extends State<DeviceSettings> {
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                  const SizedBox(height: 8),
-                  Text(
-                    context.l10n.doubleTapActionDesc,
-                    style: TextStyle(
-                      color: Colors.grey.shade500,
-                      fontSize: 13,
-                    ),
-                  ),
                   const SizedBox(height: 16),
                   ListTile(
                     title: Text(
@@ -467,13 +448,6 @@ class _DeviceSettingsState extends State<DeviceSettings> {
                       style: const TextStyle(
                         color: Colors.white,
                         fontWeight: FontWeight.w400,
-                      ),
-                    ),
-                    subtitle: Text(
-                      context.l10n.starOngoingDesc,
-                      style: TextStyle(
-                        color: Colors.grey.shade500,
-                        fontSize: 12,
                       ),
                     ),
                     trailing: currentAction == 2 ? const Icon(Icons.check, color: Colors.white, size: 20) : null,
@@ -752,29 +726,6 @@ class _DeviceSettingsState extends State<DeviceSettings> {
     );
   }
 
-  void _showWifiSyncSheet() {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (context) => WifiSyncSettingsPage(
-          initialSsid: _wifiSsid,
-          initialPassword: _wifiPassword,
-          onCredentialsSaved: (ssid, password) {
-            setState(() {
-              _wifiSsid = ssid;
-              _wifiPassword = password;
-            });
-          },
-          onCredentialsCleared: () {
-            setState(() {
-              _wifiSsid = null;
-              _wifiPassword = null;
-            });
-          },
-        ),
-      ),
-    );
-  }
-
   Widget _buildPresetButton(String label, int level, int currentLevel, VoidCallback onTap) {
     final isSelected = level == currentLevel;
     return GestureDetector(
@@ -851,8 +802,8 @@ class _DeviceSettingsState extends State<DeviceSettings> {
             _buildProfileStyleItem(
               icon: FontAwesomeIcons.wifi,
               title: 'WiFi Sync',
-              chipValue: _wifiSsid != null ? 'Configured' : 'Not Set',
-              onTap: _showWifiSyncSheet,
+              chipValue: 'Available',
+              showChevron: false,
             ),
           ],
         ],
@@ -1030,12 +981,14 @@ class _DeviceSettingsState extends State<DeviceSettings> {
 
   Widget _buildDisconnectedOverlay() {
     return Container(
+      width: double.infinity,
       padding: const EdgeInsets.all(32),
       decoration: BoxDecoration(
         color: const Color(0xFF1C1C1E),
         borderRadius: BorderRadius.circular(14),
       ),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
           Container(
             width: 64,
@@ -1106,11 +1059,11 @@ class _DeviceSettingsState extends State<DeviceSettings> {
               ],
               if (provider.isConnected) ...[
                 const SizedBox(height: 16),
-                _buildSectionHeader(context.l10n.deviceInfoSection),
-                _buildDeviceInfoSection(provider.pairedDevice, provider),
-                const SizedBox(height: 32),
                 _buildSectionHeader(context.l10n.customizationSection),
                 _buildCustomizationSection(),
+                const SizedBox(height: 32),
+                _buildSectionHeader(context.l10n.deviceInfoSection),
+                _buildDeviceInfoSection(provider.pairedDevice, provider),
                 const SizedBox(height: 32),
                 _buildSectionHeader(context.l10n.hardwareSection),
                 _buildHardwareInfoSection(provider.pairedDevice),
